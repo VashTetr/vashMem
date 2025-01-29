@@ -1,6 +1,7 @@
 package MemoryScanning
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"strconv"
@@ -22,6 +23,8 @@ var (
 	getWindowLongPtr       = user32DLL.NewProc("GetWindowLongPtrA")
 	readProcessMemory      = kernel32.NewProc("ReadProcessMemory")
 	writeProcessMemory     = kernel32.NewProc("WriteProcessMemory")
+	openProcess            = kernel32.NewProc("OpenProcess")
+	closeHandle            = kernel32.NewProc("CloseHandle")
 	err                    error
 	pid                    uint32
 	aobCache               []AobCache
@@ -90,7 +93,7 @@ func GetPointerDynamic(pHandle *uintptr, aobScan *string, offset int64, pid *uin
 	addrLocation = ProcessPatternScan(pHandle, 0, 0, convertedAob...) + offset
 
 	if memRead, err = ReadMemory(uintptr(addrLocation), int(*pid), size); err != nil {
-		fmt.Println("address location of pattern scan invalid", err)
+		fmt.Println("address location of pattern scan invalid: ", err)
 	}
 	relativeLocation = uintptr(memRead)
 
@@ -101,13 +104,13 @@ func GetModulePatternStatic(pid uint32, hProcess *uintptr, moduleName string, ao
 	if size == 0 {
 		size = 4
 	}
-	prebuf := make([]byte, 32)
-	buf := make([]byte, 32)
+	prebuf := make([]byte, 8)
+	buf := make([]byte, 8)
+
 	for i := 0; i < len(aobCache); i++ {
 		if aobCache[i].aobPattern == *aobScan {
 			ReadRaw(hProcess, &aobCache[i].address, prebuf)
 			if aobCache[i].expected == ByteArrayToString(prebuf) {
-				//fmt.Println(aobCache[i].address, prebuf, buf)
 				return uintptr(aobCache[i].address), nil
 			}
 		}
@@ -118,7 +121,7 @@ func GetModulePatternStatic(pid uint32, hProcess *uintptr, moduleName string, ao
 	}
 
 	if addrLocation, err = ModulePatternScan(pid, hProcess, moduleName, convertedAob...); err != nil {
-		fmt.Println("address location of module pattern scan invalid", err)
+		fmt.Printf("address location of module pattern scan invalid: %v\n", err)
 	}
 	relativeLocation = uintptr(addrLocation)
 	ReadRaw(hProcess, &relativeLocation, buf)
@@ -316,27 +319,33 @@ func ReadMemoryStr(address uintptr, pid int) (string, error) {
 		address++
 	}
 }
+func WriteProcessMemory(pid uint32, address uintptr, valueToWrite float32, size uint32) error {
 
-func WriteProcessMemory(pid int, address uintptr, valueToWrite uint64, size int) error {
-	var value [8]byte
-	for i := 0; i < size; i++ {
-		value[i] = byte(valueToWrite >> (8 * i))
-	}
-
-	handle, _, err := openProcessProc.Call(uintptr(PROCESS_VM_WRITE|PROCESS_VM_OPERATION), 0, uintptr(pid))
-	if handle == 0 {
+	// Open the process with all access
+	processHandle, _, err := openProcess.Call(0x001F0FFF, 0, uintptr(pid))
+	if processHandle == 0 {
 		return fmt.Errorf("failed to open process: %v", err)
 	}
-	defer syscall.CloseHandle(syscall.Handle(handle))
+	defer closeHandle.Call(processHandle)
 
-	_, _, err = writeProcessMemory.Call(handle, address, uintptr(unsafe.Pointer(&value[0])), uintptr(size), 0)
-	if err != syscall.Errno(0) {
-		return fmt.Errorf("failed to write memory: %v", err)
+	// Convert the float value to bytes
+	valueBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(valueBytes, math.Float32bits(valueToWrite))
+
+	// Write the value to the process memory
+	var bytesWritten uintptr
+	ret, _, err := writeProcessMemory.Call(processHandle, address, uintptr(unsafe.Pointer(&valueBytes[0])), uintptr(size), uintptr(unsafe.Pointer(&bytesWritten)))
+	if ret == 0 {
+		return fmt.Errorf("failed to write process memory: %v", err)
 	}
 
 	return nil
 }
 
+func FloatToHex(f float64) string {
+	bits := math.Float64bits(f)
+	return fmt.Sprintf("0x%X", bits)
+}
 func GetAddress(PID int, Base uintptr, Address uintptr, Offset string) (uintptr, error) {
 	PointerBase := Base + Address
 
@@ -379,7 +388,13 @@ func HexToFloat(d uint32) float32 {
 
 	return float32((float64(1 - 2*int(sign))) * math.Pow(2, float64(exponent-127)) * (1 + float64(mantissa)/8388608))
 }
+func HexToFloat64(d uint32) float64 {
+	sign := (d >> 31) & 1
+	exponent := (d >> 23) & 0xFF
+	mantissa := d & 0x7FFFFF
 
+	return float64((float64(1 - 2*int(sign))) * math.Pow(2, float64(exponent-127)) * (1 + float64(mantissa)/8388608))
+}
 func HexToFloatBig(x uint32) float32 {
 	sign := (x >> 31) & 1
 	exponent := (x >> 23) & 0xFF
@@ -488,7 +503,7 @@ func HexStringToBytes(hexString string) ([]byte, error) {
 	for i := 0; i < len(hexString); i += 2 {
 		val, err := strconv.ParseInt(hexString[i:i+2], 16, 64)
 		if err != nil {
-			fmt.Println(hexString[i:i+2], hexString)
+			//fmt.Println(hexString[i:i+2], hexString)
 			return nil, fmt.Errorf("error parsing hex string '%s': %w", hexString[i:i+2], err)
 		}
 		bytes[i/2] = byte(val)
@@ -826,7 +841,6 @@ func WriteBytes(pid int, address uintptr, aobString string, offsets ...uintptr) 
 		uintptr(0),
 		uintptr(uint32(pid)),
 	)
-	fmt.Println(err)
 	if hProcess == 0 {
 		return fmt.Errorf("failed to open process: %v", err)
 	}
