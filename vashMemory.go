@@ -97,7 +97,7 @@ func GetPointerDynamic(pHandle *uintptr, aobScan *string, offset int64, pid *uin
 	return relativeLocation
 
 }
-func GetModulePatternStatic(hProcess *uintptr, moduleName string, aobScan *string, size int) (uintptr, error) {
+func GetModulePatternStatic(pid uint32, hProcess *uintptr, moduleName string, aobScan *string, size int) (uintptr, error) {
 	if size == 0 {
 		size = 4
 	}
@@ -107,7 +107,7 @@ func GetModulePatternStatic(hProcess *uintptr, moduleName string, aobScan *strin
 		if aobCache[i].aobPattern == *aobScan {
 			ReadRaw(hProcess, &aobCache[i].address, prebuf)
 			if aobCache[i].expected == ByteArrayToString(prebuf) {
-				fmt.Println(aobCache[i].address, prebuf, buf)
+				//fmt.Println(aobCache[i].address, prebuf, buf)
 				return uintptr(aobCache[i].address), nil
 			}
 		}
@@ -117,7 +117,7 @@ func GetModulePatternStatic(hProcess *uintptr, moduleName string, aobScan *strin
 		fmt.Printf("could not convert aobScan (%v) to converted AOB(%v)\n", *aobScan, convertedAob)
 	}
 
-	if addrLocation, err = ModulePatternScan(hProcess, moduleName, convertedAob...); err != nil {
+	if addrLocation, err = ModulePatternScan(pid, hProcess, moduleName, convertedAob...); err != nil {
 		fmt.Println("address location of module pattern scan invalid", err)
 	}
 	relativeLocation = uintptr(addrLocation)
@@ -704,7 +704,7 @@ func IsTarget64bit() (bool, error) {
 
 	return !isWow64, nil
 }
-func ModulePatternScan(hProcess *uintptr, moduleName string, aobPattern ...string) (int64, error) {
+func ModulePatternScan(pid uint32, hProcess *uintptr, moduleName string, aobPattern ...string) (int64, error) {
 	const (
 		MEM_COMMIT    = 0x1000
 		MEM_MAPPED    = 0x40000
@@ -719,7 +719,7 @@ func ModulePatternScan(hProcess *uintptr, moduleName string, aobPattern ...strin
 	var patternSize int
 	if moduleName != "" {
 		moduleInfo, _ = GetModuleInfo(pid, moduleName)
-		fmt.Println(moduleInfo)
+		//fmt.Println(moduleInfo)
 	} else {
 		moduleInfo.lpBaseOfDll = 0
 		moduleInfo.SizeOfImage = 0x7FFFFFFF
@@ -820,7 +820,7 @@ func WriteBytes(pid int, address uintptr, aobString string, offsets ...uintptr) 
 	if offsets == nil {
 		offsets = []uintptr{0x0}
 	}
-	fmt.Printf("Opening process with PID: %d\n %v", pid, aob)
+	//fmt.Printf("Opening process with PID: %d\n %v", pid, aob)
 	hProcess, _, err := openProcessProc.Call(
 		uintptr(PROCESS_VM_WRITE|PROCESS_VM_OPERATION|PROCESS_VM_READ|PROCESS_QUERY_INFORMATION),
 		uintptr(0),
@@ -833,7 +833,7 @@ func WriteBytes(pid int, address uintptr, aobString string, offsets ...uintptr) 
 	defer syscall.CloseHandle(syscall.Handle(hProcess))
 
 	targetAddress := GetAddressFromOffsets(address, offsets...)
-	fmt.Printf("Target address: 0x%X\n", targetAddress)
+	//fmt.Printf("Target address: 0x%X\n", targetAddress)
 
 	var numberOfBytesWritten uint32
 	res, _, err := writeProcessMemory.Call(
