@@ -60,6 +60,7 @@ type ModuleEntry32 struct {
 	szModule      [256]uint16
 	szExePath     [260]uint16
 }
+
 type AobCache struct {
 	aobPattern string
 	address    uintptr
@@ -81,7 +82,7 @@ type MemoryInfo struct {
 	Protect     uint32
 }
 
-func GetPointerDynamic(pHandle *uintptr, aobScan *string, offset int64, pid *uint32, size int) uintptr {
+func GetPointerDynamic(pHandle, base *uintptr, aobScan *string, offset int64, pid *uint32, size int) uintptr {
 	if size == 0 {
 		size = 4
 	}
@@ -95,43 +96,36 @@ func GetPointerDynamic(pHandle *uintptr, aobScan *string, offset int64, pid *uin
 	if memRead, err = ReadMemory(uintptr(addrLocation), int(*pid), size); err != nil {
 		fmt.Println("address location of pattern scan invalid: ", err)
 	}
-	relativeLocation = uintptr(memRead)
+	relativeLocation = uintptr(memRead) - *base
 
 	return relativeLocation
 
 }
-func GetModulePatternStatic(pid uint32, hProcess *uintptr, moduleName string, aobScan *string, size int) (uintptr, error) {
+
+func GetModulePatternStatic(pid uint32, hProcess *uintptr, moduleName string, aobScan string, size int) (uintptr, error) {
 	if size == 0 {
 		size = 4
 	}
-	prebuf := make([]byte, 8)
-	buf := make([]byte, 8)
-
-	for i := 0; i < len(aobCache); i++ {
-		if aobCache[i].aobPattern == *aobScan {
-			ReadRaw(hProcess, &aobCache[i].address, prebuf)
-			if aobCache[i].expected == ByteArrayToString(prebuf) {
-				return uintptr(aobCache[i].address), nil
-			}
-		}
-	}
-
-	if convertedAob, err = HexStringToPattern(*aobScan); err != nil {
-		fmt.Printf("could not convert aobScan (%v) to converted AOB(%v)\n", *aobScan, convertedAob)
+	buf := make([]byte, 32)
+	if convertedAob, err = HexStringToPattern(aobScan); err != nil {
+		fmt.Printf("could not convert aobScan (%v) to converted AOB(%v)\n", aobScan, convertedAob)
+		return 0, err
 	}
 
 	if addrLocation, err = ModulePatternScan(pid, hProcess, moduleName, convertedAob...); err != nil {
-		fmt.Printf("address location of module pattern scan invalid: %v\n", err)
+		fmt.Printf("address location of module pattern scan invalid: %v; %v\n", err, convertedAob)
+		return 0, err
+	}
+	if addrLocation == 0 {
+		return 0, fmt.Errorf("could not find pattern in module")
 	}
 	relativeLocation = uintptr(addrLocation)
-	ReadRaw(hProcess, &relativeLocation, buf)
-	aobCache = append(aobCache,
-		AobCache{
-			*aobScan,
-			uintptr(relativeLocation),
-			ByteArrayToString(buf),
-		},
-	)
+
+	res := ReadRaw(hProcess, &relativeLocation, buf)
+	if !res {
+		//fmt.Println("could not read memory at relative location")
+		return 0, fmt.Errorf("could not read memory at relative location")
+	}
 	return relativeLocation, nil
 }
 
@@ -143,9 +137,11 @@ func GetPointerStatic(pHandle, base *uintptr, aobScan *string, offset int64, pid
 	buf := make([]byte, 32)
 	for i := 0; i < len(aobCache); i++ {
 		if aobCache[i].aobPattern == *aobScan {
-			ReadRaw(pHandle, &aobCache[i].address, prebuf)
-			if aobCache[i].expected == ByteArrayToString(prebuf) {
-				return uintptr(aobCache[i].address)
+			if aobCache[i].address != 0 {
+				ReadRaw(pHandle, &aobCache[i].address, prebuf)
+				if aobCache[i].expected == ByteArrayToString(prebuf) {
+					return uintptr(aobCache[i].address)
+				}
 			}
 		}
 	}
@@ -178,6 +174,7 @@ func UintptrToHex(ptr uintptr) string {
 	hexString := strconv.FormatUint(uint64(ptr), 16)
 	return hexString
 }
+
 func ByteArrayToString(arr []byte) string {
 	str := ""
 	for _, val := range arr {
@@ -272,17 +269,18 @@ func ReadMemory(MADDRESS uintptr, pid int, size int) (uint64, error) {
 	if handle == 0 {
 		return 0, fmt.Errorf("failed to open process: %v", err)
 	}
-	defer syscall.CloseHandle(syscall.Handle(handle))
 
 	var totalBytesRead uintptr
 	for totalBytesRead < uintptr(size) {
 		var bytesRead uintptr
 		r1, _, err := readProcessMemory.Call(handle, MADDRESS+totalBytesRead, uintptr(unsafe.Pointer(&buffer[totalBytesRead])), uintptr(size-int(totalBytesRead)), uintptr(unsafe.Pointer(&bytesRead)))
 		if r1 == 0 {
+			syscall.CloseHandle(syscall.Handle(handle))
 			return 0, fmt.Errorf("failed to read memory: %v", err)
 		}
 		totalBytesRead += bytesRead
 		if bytesRead == 0 {
+			syscall.CloseHandle(syscall.Handle(handle))
 			return 0, fmt.Errorf("only part of the memory was read: expected %d bytes, but read %d bytes", size, totalBytesRead)
 		}
 	}
@@ -291,7 +289,7 @@ func ReadMemory(MADDRESS uintptr, pid int, size int) (uint64, error) {
 	for i := 0; i < size; i++ {
 		result |= uint64(buffer[i]) << (8 * i)
 	}
-
+	syscall.CloseHandle(syscall.Handle(handle))
 	return result, nil
 }
 func ReadMemoryStr(address uintptr, pid int) (string, error) {
@@ -319,15 +317,15 @@ func ReadMemoryStr(address uintptr, pid int) (string, error) {
 		address++
 	}
 }
+
 func WriteProcessMemory(pid uint32, address uintptr, valueToWrite float32, size uint32) error {
 
 	// Open the process with all access
-	processHandle, _, err := openProcess.Call(0x001F0FFF, 0, uintptr(pid))
+	processHandle, _, err := openProcess.Call(PROCESS_VM_READ|PROCESS_VM_WRITE|PROCESS_VM_OPERATION, 0, uintptr(pid))
 	if processHandle == 0 {
 		return fmt.Errorf("failed to open process: %v", err)
 	}
-	defer closeHandle.Call(processHandle)
-
+	defer syscall.CloseHandle(syscall.Handle(processHandle))
 	// Convert the float value to bytes
 	valueBytes := make([]byte, 4)
 	binary.LittleEndian.PutUint32(valueBytes, math.Float32bits(valueToWrite))
@@ -335,7 +333,7 @@ func WriteProcessMemory(pid uint32, address uintptr, valueToWrite float32, size 
 	// Write the value to the process memory
 	var bytesWritten uintptr
 	ret, _, err := writeProcessMemory.Call(processHandle, address, uintptr(unsafe.Pointer(&valueBytes[0])), uintptr(size), uintptr(unsafe.Pointer(&bytesWritten)))
-	if ret == 0 {
+	if ret == 0 || err != nil {
 		return fmt.Errorf("failed to write process memory: %v", err)
 	}
 
@@ -382,25 +380,35 @@ func GetAddress(PID int, Base uintptr, Address uintptr, Offset string) (uintptr,
 }
 
 func HexToFloat(d uint32) float32 {
-	sign := (d >> 31) & 1
-	exponent := (d >> 23) & 0xFF
-	mantissa := d & 0x7FFFFF
-
-	return float32((float64(1 - 2*int(sign))) * math.Pow(2, float64(exponent-127)) * (1 + float64(mantissa)/8388608))
+	return math.Float32frombits(d)
 }
-func HexToFloat64(d uint32) float64 {
-	sign := (d >> 31) & 1
-	exponent := (d >> 23) & 0xFF
-	mantissa := d & 0x7FFFFF
 
-	return float64((float64(1 - 2*int(sign))) * math.Pow(2, float64(exponent-127)) * (1 + float64(mantissa)/8388608))
-}
 func HexToFloatBig(x uint32) float32 {
-	sign := (x >> 31) & 1
-	exponent := (x >> 23) & 0xFF
-	mantissa := x & 0x7FFFFF
+	return math.Float32frombits(x)
+}
+func Float32ToFloat64(f32 float32) float64 {
+	return float64(f32)
+}
 
-	return float32((float64(1 - 2*int(sign))) * math.Pow(2, float64(exponent-150)) * (float64(0x800000 | mantissa)))
+func Float64ToFloat32(f64 float64) float32 {
+	return float32(f64)
+}
+
+func HexToFloat64(d uint64) float64 {
+	return Float32ToFloat64(HexToFloat(uint32(d)))
+}
+
+func Float64ToHex(f float64) string {
+	return IntToHex(int(math.Float32bits(float32(f))))
+}
+
+func Float64ToUint64(f float64) uint64 {
+	//fmt.Println(math.Float64bits(f))
+	return math.Float64bits(f)
+}
+
+func Float64ToUint32(f float64) uint32 {
+	return uint32(math.Float32bits(Float64ToFloat32(f)))
 }
 
 func IntToHexOld(value int) string {
@@ -758,6 +766,7 @@ func ModulePatternScan(pid uint32, hProcess *uintptr, moduleName string, aobPatt
 			memInfo.RegionSize >= uintptr(patternSize) {
 
 			result := PatternScan(hProcess, &address, &memInfo.RegionSize, patternMask, &needleBuffer)
+
 			if result > 0 {
 				return result, nil
 			}
@@ -765,7 +774,6 @@ func ModulePatternScan(pid uint32, hProcess *uintptr, moduleName string, aobPatt
 
 		address += memInfo.RegionSize
 	}
-
 	return 0, fmt.Errorf("pattern not found")
 }
 
